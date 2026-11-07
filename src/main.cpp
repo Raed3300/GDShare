@@ -9,8 +9,35 @@
 #include <Geode/utils/async.hpp>
 #include <hjfod.gmd-api/include/GMD.hpp>
 
+#include <filesystem>
+#include <type_traits>
+
 using namespace geode::prelude;
 using namespace gmd;
+
+// The file picker / Geode path APIs return asp::fs::Path, but gmd-api still
+// takes std::filesystem::path. This converts from whatever the SDK gives us.
+template <class P>
+static std::filesystem::path toStdPath(P const& p) {
+    if constexpr (std::is_convertible_v<P const&, std::filesystem::path>) {
+        return p;
+    }
+    else if constexpr (std::is_constructible_v<std::filesystem::path, P const&>) {
+        return std::filesystem::path(p);
+    }
+    else if constexpr (requires { p.native(); }) {
+        return std::filesystem::path(p.native());
+    }
+    else if constexpr (requires { p.string(); }) {
+        return std::filesystem::path(p.string());
+    }
+    else if constexpr (requires { p.toString(); }) {
+        return std::filesystem::path(p.toString());
+    }
+    else {
+        static_assert(sizeof(P) == 0, "toStdPath: don't know how to convert this path type");
+    }
+}
 
 static auto IMPORT_PICK_OPTIONS = file::FilePickOptions {
     std::nullopt,
@@ -48,12 +75,13 @@ static void onExportFilePick(L* level, file::PickResult result) {
     if (result.isOk()) {
         auto path = std::move(result).unwrap();
         if (!path) return;
+        auto stdPath = toStdPath(*path);
         std::optional<std::string> err;
         if constexpr (std::is_same_v<L, GJLevelList>) {
-            err = exportListAsGmd(level, *path).err();
+            err = exportListAsGmd(level, stdPath).err();
         }
         else {
-            err = exportLevelAsGmd(level, *path).err();
+            err = exportLevelAsGmd(level, stdPath).err();
         }
         if (!err) {
             createQuickPopup(
@@ -87,15 +115,16 @@ static void exportMany(std::vector<L*> levels, file::PickResult result) {
         auto optPath = std::move(result).unwrap();
         if (!optPath) return;
         auto path = std::move(*optPath);
+        auto stdPath = toStdPath(path);
         
         std::vector<std::string> errs;
         for (auto level : levels) {
             std::optional<std::string> err;
             if constexpr (std::is_same_v<L, GJLevelList>) {
-                err = exportListAsGmd(level, path / (std::string(level->m_listName) + ".gmdl")).err();
+                err = exportListAsGmd(level, stdPath / (std::string(level->m_listName) + ".gmdl")).err();
             }
             else {
-                err = exportLevelAsGmd(level, path / (std::string(level->m_levelName) + ".gmd")).err();
+                err = exportLevelAsGmd(level, stdPath / (std::string(level->m_levelName) + ".gmd")).err();
             }
             if (err) errs.push_back(*err);
         }
@@ -263,7 +292,13 @@ struct $modify(ImportLayer, LevelBrowserLayer) {
             file::pickMany(IMPORT_PICK_OPTIONS),
             [](file::PickManyResult result) {
                 if (result.isOk()) {
-                    importFiles(std::move(result).unwrap());
+                    auto picked = std::move(result).unwrap();
+                    std::vector<std::filesystem::path> paths;
+                    paths.reserve(picked.size());
+                    for (auto const& p : picked) {
+                        paths.push_back(toStdPath(p));
+                    }
+                    importFiles(paths);
                 }
                 else {
                     FLAlertLayer::create("Error Importing", result.unwrapErr(), "OK")->show();
@@ -380,4 +415,3 @@ struct $modify(ExportListLayer, LevelListLayer) {
         );
     }
 };
-
